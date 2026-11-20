@@ -1,0 +1,719 @@
+--// Carrega Rayfield UI
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+--// Serviços
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+--// Limpa instância anterior se o script for reexecutado
+if getgenv().SailorHubCleanup then
+	pcall(getgenv().SailorHubCleanup)
+end
+
+local ActiveConnections = {}
+local ActiveRunning = true
+
+getgenv().SailorHubCleanup = function()
+	ActiveRunning = false
+	for _, conn in ipairs(ActiveConnections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	table.clear(ActiveConnections)
+	local oldFloor = Workspace:FindFirstChild("HubSafeFloor")
+	if oldFloor then oldFloor:Destroy() end
+end
+
+local function GetCharParts()
+	local char = LocalPlayer.Character
+	if not char then return nil, nil, nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+	return char, hum, hrp
+end
+
+--// Pontos comuns de spawn marítimo para Sea Beast
+local SeaBeastSpawnPoints = {
+	CFrame.new(0, 20, 2500),
+	CFrame.new(1800, 20, 1800),
+	CFrame.new(-1800, 20, 1800),
+	CFrame.new(2200, 20, -1400),
+	CFrame.new(-2200, 20, -1400)
+}
+
+--// Pontos de varredura de ilhas caso mob de outra ilha ainda não tenha carregado
+local FallbackIslandScanSpots = {
+	CFrame.new(0, 45, 0),
+	CFrame.new(1200, 45, 900),
+	CFrame.new(-1200, 45, 900),
+	CFrame.new(1500, 45, -1100),
+	CFrame.new(-1500, 45, -1100),
+	CFrame.new(0, 45, 2000),
+	CFrame.new(0, 45, -2000)
+}
+
+--// Configurações Globais
+getgenv().HubConfig = {
+	AutoFarm = false,
+	FarmAllNearby = true,
+	SelectedMobs = {},
+	CombatStyle = "Melee",
+	AutoAttack = false,
+	RangeEnabled = true,
+	RangeSize = 150,
+	SideOffset = 4.5,
+	TpBypass = true,
+	AutoSeaBeast = false,
+	CustomSeaSpot = nil
+}
+
+local LabelToRealName = {}
+local KnownMobPositions = {}
+local KnownMobLevels = {}
+local UniqueMobSet = {}
+local CachedAliveByName = {}
+local CachedRemotes = {}
+local LastMobScan = 0
+local LastRemoteRefresh = 0
+local LastTpTime = 0
+local IslandProbeIndex = 1
+local SeaSpotIndex = 1
+
+local IgnoredKeywords = {
+	"dummy", "damage", "dmg", "test", "testing", "training", "train",
+	"dps", "target", "bag", "punching", "shop", "quest", "vendor"
+}
+
+local function IsIgnoredModel(obj)
+	if not obj then return true end
+	local n = obj.Name:lower()
+	for _, word in ipairs(IgnoredKeywords) do
+		if n:find(word, 1, true) then
+			return true
+		end
+	end
+	local parent = obj.Parent
+	if parent and parent ~= Workspace then
+		local pn = parent.Name:lower()
+		for _, word in ipairs(IgnoredKeywords) do
+			if pn:find(word, 1, true) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function GetScanRoots()
+	local roots = {}
+	for _, folderName in ipairs({"Enemies", "Mobs", "Monsters"}) do
+		local folder = Workspace:FindFirstChild(folderName)
+		if folder then
+			table.insert(roots, folder)
+		end
+	end
+	if #roots == 0 then
+		table.insert(roots, Workspace)
+	end
+	return roots
+end
+
+local function ExtractMobLevel(model, hum)
+	for _, attrName in ipairs({"Level", "Lvl", "MobLevel", "NpcLevel", "Lv"}) do
+		local val = model:GetAttribute(attrName) or (hum and hum:GetAttribute(attrName))
+		if type(val) == "number" and val > 0 then
+			return tostring(math.floor(val))
+		elseif type(val) == "string" then
+			local num = val:match("%d+")
+			if num then return num end
+		end
+	end
+
+	if hum and hum.DisplayName and hum.DisplayName ~= "" then
+		local lvFromDisp = hum.DisplayName:match("[Ll][Vv]%a*%.?%s*(%d+)") or hum.DisplayName:match("%[(%d+)%]")
+		if lvFromDisp then
+			return lvFromDisp
+		end
+	end
+
+	for _, desc in ipairs(model:GetDescendants()) do
+		if desc:IsA("TextLabel") and desc.Text and desc.Text ~= "" then
+			local txt = desc.Text
+			local lvMatch = txt:match("[Ll][Vv]%a*%.?%s*(%d+)") or txt:match("%[(%d+)%]") or txt:match("^%d+$")
+			if lvMatch then
+				return lvMatch
+			end
+		end
+	end
+
+	return nil
+end
+
+local function ScanWorldMobs(force)
+	if not force and (os.clock() - LastMobScan < 0.85) then
+		return CachedAliveByName
+	end
+	LastMobScan = os.clock()
+
+	local aliveMap = {}
+	local counts = {}
+
+	local function collectFrom(container, recordAlive)
+		if not container then return end
+		for _, obj in ipairs(container:GetDescendants()) do
+			if obj:IsA("Model") and not Players:GetPlayerFromCharacter(obj) and not IsIgnoredModel(obj) then
+				local hum = obj:FindFirstChildOfClass("Humanoid")
+				if hum then
+					local realName = tostring(obj.Name):gsub("^%s+", ""):gsub("%s+$", "")
+					if realName ~= "" then
+						UniqueMobSet[realName] = true
+
+						local detectedLv = ExtractMobLevel(obj, hum)
+						if detectedLv then
+							KnownMobLevels[realName] = detectedLv
+						end
+
+						local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+						if hrp and hrp:IsA("BasePart") then
+							KnownMobPositions[realName] = hrp.CFrame
+						end
+
+						if recordAlive and hrp and hrp:IsA("BasePart") and hum.Health > 0 and hum:GetState() ~= Enum.HumanoidStateType.Dead then
+							aliveMap[realName] = aliveMap[realName] or {}
+							table.insert(aliveMap[realName], {
+								model = obj,
+								hum = hum,
+								hrp = hrp
+							})
+							counts[realName] = (counts[realName] or 0) + 1
+						end
+					end
+				end
+			end
+		end
+	end
+
+	for _, root in ipairs(GetScanRoots()) do
+		collectFrom(root, true)
+	end
+	collectFrom(ReplicatedStorage:FindFirstChild("Enemies") or ReplicatedStorage:FindFirstChild("Mobs"), false)
+
+	CachedAliveByName = aliveMap
+	return aliveMap, counts
+end
+
+--// ==========================================
+--// JANELA PRINCIPAL RAYFIELD
+--// ==========================================
+local Window = Rayfield:CreateWindow({
+	Name = "Sailor Piece Hub | Sea 2",
+	LoadingTitle = "Carregando Hub...",
+	LoadingSubtitle = "Multi-Mob • TP Bypass • Ultra Range",
+	ConfigurationSaving = { Enabled = false },
+	KeySystem = false
+})
+
+local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
+local CombatTab = Window:CreateTab("Combate & Range", 4483362458)
+local SeaTab = Window:CreateTab("Sea Event", 4483362458)
+
+local function BuildMobList()
+	table.clear(LabelToRealName)
+	local _, counts = ScanWorldMobs(true)
+
+	local sortedUnique = {}
+	local seenNorm = {}
+	for realName in pairs(UniqueMobSet) do
+		local norm = realName:lower()
+		if not seenNorm[norm] then
+			seenNorm[norm] = true
+			table.insert(sortedUnique, realName)
+		end
+	end
+	table.sort(sortedUnique, function(a, b)
+		return a:lower() < b:lower()
+	end)
+
+	local displayList = {}
+	for _, realName in ipairs(sortedUnique) do
+		local lvStr = KnownMobLevels[realName] and (" [Lv." .. KnownMobLevels[realName] .. "]") or " [Lv.?]"
+		local aliveCount = (counts and counts[realName]) or 0
+		local statusStr = aliveCount > 0 and (" (" .. aliveCount .. ")") or " (Outra Ilha)"
+		local label = realName .. lvStr .. statusStr
+
+		LabelToRealName[label] = realName
+		table.insert(displayList, label)
+	end
+
+	if #displayList == 0 then
+		table.insert(displayList, "Nenhum mob encontrado")
+	end
+	return displayList
+end
+
+--// ==========================================
+--// ABA 1: AUTO FARM & TP BYPASS ENTRE ILHAS
+--// ==========================================
+local MobDropdown = FarmTab:CreateDropdown({
+	Name = "Selecionar Mobs (Nome + Nível)",
+	Options = BuildMobList(),
+	CurrentOption = {},
+	MultipleOptions = true,
+	Flag = "MultiMobSelect",
+	Callback = function(SelectedOptions)
+		local cleanList = {}
+		local seen = {}
+		for _, label in ipairs(SelectedOptions or {}) do
+			local real = LabelToRealName[label]
+			if real and not seen[real:lower()] then
+				seen[real:lower()] = true
+				table.insert(cleanList, real)
+			end
+		end
+		getgenv().HubConfig.SelectedMobs = cleanList
+	end,
+})
+
+FarmTab:CreateButton({
+	Name = "Atualizar Lista (Sem Repetir)",
+	Callback = function()
+		local updated = BuildMobList()
+		MobDropdown:Refresh(updated)
+		Rayfield:Notify({
+			Title = "Lista Atualizada",
+			Content = #updated .. " mobs únicos listados.",
+			Duration = 3
+		})
+	end,
+})
+
+FarmTab:CreateToggle({
+	Name = "Ativar Auto Farm",
+	CurrentValue = false,
+	Flag = "AutoFarmToggle",
+	Callback = function(Value)
+		getgenv().HubConfig.AutoFarm = Value
+	end,
+})
+
+FarmTab:CreateToggle({
+	Name = "Matar Mobs do Mesmo Grupo Perto",
+	CurrentValue = true,
+	Flag = "FarmNearbyToggle",
+	Callback = function(Value)
+		getgenv().HubConfig.FarmAllNearby = Value
+	end,
+})
+
+FarmTab:CreateToggle({
+	Name = "TP Bypass (Ir para Outra Ilha)",
+	CurrentValue = true,
+	Flag = "TpBypassToggle",
+	Callback = function(Value)
+		getgenv().HubConfig.TpBypass = Value
+	end,
+})
+
+--// ==========================================
+--// ABA 2: COMBATE (SWORD / MELEE, AUTO ATTACK, RANGE)
+--// ==========================================
+CombatTab:CreateDropdown({
+	Name = "Estilo de Combate",
+	Options = {"Sword", "Melee"},
+	CurrentOption = {"Melee"},
+	MultipleOptions = false,
+	Flag = "CombatStyleDrop",
+	Callback = function(Option)
+		local val = type(Option) == "table" and Option[1] or Option
+		getgenv().HubConfig.CombatStyle = val or "Melee"
+	end,
+})
+
+CombatTab:CreateToggle({
+	Name = "Auto Attack (Bater Sozinho)",
+	CurrentValue = false,
+	Flag = "AutoAttackToggle",
+	Callback = function(Value)
+		getgenv().HubConfig.AutoAttack = Value
+	end,
+})
+
+CombatTab:CreateToggle({
+	Name = "Range (Bater de Longe)",
+	CurrentValue = true,
+	Flag = "RangeToggle",
+	Callback = function(Value)
+		getgenv().HubConfig.RangeEnabled = Value
+	end,
+})
+
+CombatTab:CreateSlider({
+	Name = "Distância / Alcance do Range",
+	Range = {20, 1000},
+	Increment = 10,
+	Suffix = "Studs",
+	CurrentValue = 150,
+	Flag = "RangeSizeSlider",
+	Callback = function(Value)
+		getgenv().HubConfig.RangeSize = Value
+	end,
+})
+
+--// ==========================================
+--// ABA 3: SEA EVENT (AUTO SEA BEAST)
+--// ==========================================
+SeaTab:CreateToggle({
+	Name = "Auto Sea Beast",
+	CurrentValue = false,
+	Flag = "ToggleSeaBeast",
+	Callback = function(Value)
+		getgenv().HubConfig.AutoSeaBeast = Value
+	end,
+})
+
+SeaTab:CreateButton({
+	Name = "Salvar Posição Atual como Spawn do Sea Beast",
+	Callback = function()
+		local _, _, hrp = GetCharParts()
+		if hrp then
+			getgenv().HubConfig.CustomSeaSpot = hrp.CFrame
+			Rayfield:Notify({
+				Title = "Spawn Salvo",
+				Content = "Ponto de spawn do Sea Beast salvo.",
+				Duration = 3
+			})
+		end
+	end,
+})
+
+--// ==========================================
+--// MECÂNICAS: TP BYPASS, ATAQUE DE LONGE E SEA BEAST
+--// ==========================================
+local FloorPart = Instance.new("Part")
+FloorPart.Name = "HubSafeFloor"
+FloorPart.Size = Vector3.new(20, 1, 20)
+FloorPart.Transparency = 1
+FloorPart.Anchored = true
+FloorPart.CanCollide = true
+FloorPart.Parent = Workspace
+
+table.insert(ActiveConnections, RunService.Stepped:Connect(function()
+	if not ActiveRunning then return end
+	local char, _, hrp = GetCharParts()
+	if (getgenv().HubConfig.AutoFarm or getgenv().HubConfig.AutoSeaBeast) and char and hrp then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = false
+			end
+		end
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		FloorPart.CFrame = hrp.CFrame * CFrame.new(0, -3.5, 0)
+	else
+		FloorPart.CFrame = CFrame.new(0, -500, 0)
+	end
+end))
+
+local function DirectTeleport(targetCFrame)
+	local _, hum, hrp = GetCharParts()
+	if not hrp or not targetCFrame then return end
+	local dist = (hrp.Position - targetCFrame.Position).Magnitude
+
+	if dist > 100 and (os.clock() - LastTpTime > 0.65) then
+		LastTpTime = os.clock()
+		pcall(function()
+			if hum then
+				hum:ChangeState(Enum.HumanoidStateType.Running)
+			end
+			LocalPlayer:RequestStreamAroundAsync(targetCFrame.Position)
+		end)
+	end
+
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	hrp.CFrame = targetCFrame
+end
+
+local function EquipSelectedStyle()
+	local char, hum = GetCharParts()
+	if not char or not hum then return nil end
+	local wanted = getgenv().HubConfig.CombatStyle
+	local current = char:FindFirstChildOfClass("Tool")
+
+	local function matches(tool)
+		local n = tool.Name:lower()
+		local tip = (tool.ToolTip or ""):lower()
+		if wanted == "Sword" then
+			return n:find("sword") or n:find("katana") or n:find("blade") or n:find("yoru") or n:find("saber") or n:find("bisento") or n:find("scythe") or tip:find("sword")
+		else
+			return n:find("combat") or n:find("melee") or n:find("fist") or n:find("step") or n:find("karate") or n:find("claw") or n:find("dragon") or n:find("punch") or tip:find("melee") or tip:find("fighting")
+		end
+	end
+
+	if current and matches(current) then
+		return current
+	end
+
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if backpack then
+		for _, tool in ipairs(backpack:GetChildren()) do
+			if tool:IsA("Tool") and matches(tool) then
+				pcall(function() hum:EquipTool(tool) end)
+				return tool
+			end
+		end
+	end
+
+	return current
+end
+
+local function GetAttackRemotes()
+	if os.clock() - LastRemoteRefresh < 8 then
+		return CachedRemotes
+	end
+	LastRemoteRefresh = os.clock()
+	local list = {}
+	for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
+		if rem:IsA("RemoteEvent") then
+			local rName = rem.Name:lower()
+			if rName:find("combat") or rName:find("attack") or rName:find("hit") or rName:find("m1") or rName:find("swing") or rName:find("punch") or rName:find("slash") then
+				table.insert(list, rem)
+			end
+		end
+	end
+	CachedRemotes = list
+	return CachedRemotes
+end
+
+local function GetRangedAttackCFrame(targetHRP, extraHeight)
+	local _, _, hrp = GetCharParts()
+	local rangeDist = math.max(10, tonumber(getgenv().HubConfig.RangeSize) or 150)
+	local hOffset = extraHeight or 3
+
+	if getgenv().HubConfig.RangeEnabled then
+		local dir = Vector3.zero
+		if hrp then
+			dir = hrp.Position - targetHRP.Position
+			dir = Vector3.new(dir.X, 0, dir.Z)
+		end
+		if dir.Magnitude < 0.01 then
+			dir = targetHRP.CFrame.RightVector
+		end
+		local standPos = targetHRP.Position + (dir.Unit * rangeDist) + Vector3.new(0, hOffset, 0)
+		return CFrame.lookAt(standPos, targetHRP.Position)
+	end
+
+	local sidePos = (targetHRP.CFrame * CFrame.new(getgenv().HubConfig.SideOffset, hOffset, 0)).Position
+	return CFrame.lookAt(sidePos, targetHRP.Position)
+end
+
+local function ExecuteAttack(targetEntry)
+	local char, _, hrp = GetCharParts()
+	if not char then return end
+	local tool = EquipSelectedStyle() or char:FindFirstChildOfClass("Tool")
+
+	if tool then
+		pcall(function() tool:Activate() end)
+		for _, child in ipairs(tool:GetChildren()) do
+			if child:IsA("RemoteEvent") then
+				pcall(function() child:FireServer() end)
+				if targetEntry and targetEntry.hrp then
+					pcall(function() child:FireServer(targetEntry.hrp.Position, targetEntry.model) end)
+				end
+			end
+		end
+	end
+
+	local remotes = GetAttackRemotes()
+	local maxRange = getgenv().HubConfig.RangeEnabled and (tonumber(getgenv().HubConfig.RangeSize) or 150) or 25
+
+	for _, rem in ipairs(remotes) do
+		pcall(function() rem:FireServer(getgenv().HubConfig.CombatStyle) end)
+		if targetEntry and targetEntry.hrp and hrp then
+			local dist = (hrp.Position - targetEntry.hrp.Position).Magnitude
+			if dist <= maxRange then
+				pcall(function() rem:FireServer(targetEntry.model, targetEntry.hrp.CFrame, maxRange) end)
+				pcall(function() rem:FireServer(targetEntry.hrp.Position, maxRange) end)
+			end
+		end
+	end
+end
+
+task.spawn(function()
+	while ActiveRunning do
+		task.wait(0.18)
+		if getgenv().HubConfig.AutoAttack then
+			ExecuteAttack(nil)
+		end
+	end
+end)
+
+local function GetOtherIslandTargetCF(selected)
+	for _, selName in ipairs(selected) do
+		if KnownMobPositions[selName] then
+			return KnownMobPositions[selName] * CFrame.new(0, 5, 0)
+		end
+	end
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			local ln = obj.Name:lower()
+			for _, selName in ipairs(selected) do
+				if ln:find(selName:lower(), 1, true) then
+					return obj.CFrame * CFrame.new(0, 5, 0)
+				end
+			end
+		end
+	end
+
+	if os.clock() - LastTpTime > 0.9 then
+		local spot = FallbackIslandScanSpots[IslandProbeIndex]
+		IslandProbeIndex = (IslandProbeIndex % #FallbackIslandScanSpots) + 1
+		return spot
+	end
+
+	return nil
+end
+
+local function MatchesSelectedMob(mobName)
+	local lowerMob = mobName:lower()
+	for _, sel in ipairs(getgenv().HubConfig.SelectedMobs) do
+		local lowerSel = sel:lower()
+		if lowerMob == lowerSel then
+			return true
+		end
+		if getgenv().HubConfig.FarmAllNearby then
+			local baseSel = lowerSel:gsub("%d+$", "")
+			local baseMob = lowerMob:gsub("%d+$", "")
+			if #baseSel >= 4 and baseSel == baseMob then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function GetNextSelectedTarget()
+	local selected = getgenv().HubConfig.SelectedMobs
+	local _, _, hrp = GetCharParts()
+	if #selected == 0 or not hrp then
+		return nil, nil
+	end
+
+	local aliveMap = ScanWorldMobs(false)
+	local bestEntry = nil
+	local bestDist = math.huge
+
+	for _, selName in ipairs(selected) do
+		local list = aliveMap[selName]
+		if list then
+			for _, entry in ipairs(list) do
+				if entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
+					KnownMobPositions[selName] = entry.hrp.CFrame
+					local d = (hrp.Position - entry.hrp.Position).Magnitude
+					if d < bestDist then
+						bestDist = d
+						bestEntry = entry
+					end
+				end
+			end
+		end
+
+		if getgenv().HubConfig.FarmAllNearby then
+			local baseSel = selName:gsub("%d+$", ""):lower()
+			if #baseSel >= 4 then
+				for mobName, listGroup in pairs(aliveMap) do
+					if MatchesSelectedMob(mobName) then
+						for _, entry in ipairs(listGroup) do
+							if entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
+								local d = (hrp.Position - entry.hrp.Position).Magnitude
+								if d < bestDist then
+									bestDist = d
+									bestEntry = entry
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if bestEntry then
+		return bestEntry, nil
+	end
+
+	if getgenv().HubConfig.TpBypass then
+		return nil, GetOtherIslandTargetCF(selected)
+	end
+
+	return nil, nil
+end
+
+local function GetSeaBeastSpawnCFrame()
+	if getgenv().HubConfig.CustomSeaSpot then
+		return getgenv().HubConfig.CustomSeaSpot
+	end
+
+	for _, obj in ipairs(Workspace:GetChildren()) do
+		if obj:IsA("BasePart") or obj:IsA("Model") then
+			local n = obj.Name:lower()
+			if n:find("seabeast") or n:find("sea beast") or n:find("sea_beast") or n:find("kraken") or n:find("ocean") or n:find("seaevent") or n:find("sea_event") then
+				local p = obj:IsA("BasePart") and obj or (obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChildWhichIsA("BasePart"))
+				if p then
+					return p.CFrame * CFrame.new(0, 15, 0)
+				end
+			end
+		end
+	end
+
+	local spot = SeaBeastSpawnPoints[SeaSpotIndex]
+	SeaSpotIndex = (SeaSpotIndex % #SeaBeastSpawnPoints) + 1
+	return spot
+end
+
+local function FindSeaBeast()
+	for _, obj in ipairs(Workspace:GetChildren()) do
+		if obj:IsA("Model") then
+			local lname = obj.Name:lower()
+			if lname:find("sea beast") or lname:find("seabeast") or lname:find("sea_beast") or lname:find("kraken") then
+				local hum = obj:FindFirstChildOfClass("Humanoid")
+				local part = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChildWhichIsA("BasePart")
+				if part and (not hum or hum.Health > 0) then
+					return obj, part
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+task.spawn(function()
+	while ActiveRunning do
+		task.wait(0.16)
+		pcall(function()
+			local char, _, hrp = GetCharParts()
+			if not char or not hrp then return end
+
+			if getgenv().HubConfig.AutoSeaBeast then
+				EquipSelectedStyle()
+				local sbModel, sbPart = FindSeaBeast()
+
+				if sbModel and sbPart then
+					local attackCF = GetRangedAttackCFrame(sbPart, 16)
+					DirectTeleport(attackCF)
+					ExecuteAttack({model = sbModel, hrp = sbPart})
+				else
+					DirectTeleport(GetSeaBeastSpawnCFrame())
+				end
+				return
+			end
+
+			if getgenv().HubConfig.AutoFarm then
+				EquipSelectedStyle()
+				local entry, nextIslandCF = GetNextSelectedTarget()
+
+				if e
