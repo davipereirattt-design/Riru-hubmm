@@ -80,7 +80,7 @@ local IgnoredKeywords = {
 }
 
 local BossKeywords = {
-	"boss", "king", "lord", "admiral", "emperor", "kraken", "leviathan", "champion"
+	"boss", "king", "lord", "admiral", "emperor", "champion"
 }
 
 local function IsIgnoredModel(obj)
@@ -286,7 +286,7 @@ end
 
 local function BuildBossList()
 	table.clear(BossLabelToRealName)
-	local aliveMap, counts = ScanWorldMobs(true)
+	local _, counts = ScanWorldMobs(true)
 
 	local sortedBosses = {}
 	local seenNorm = {}
@@ -731,4 +731,4 @@ local function GetTargetBossEntry()
 	for bossName, list in pairs(aliveMap) do
 		if KnownBossSet[bossName] then
 			for _, entry in ipairs(list) do
-				if entry.model.Parent
+				if entry.model.Parent and entry.hrp.Parent and entr
