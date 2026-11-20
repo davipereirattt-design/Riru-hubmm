@@ -53,20 +53,16 @@ getgenv().HubConfig = {
 	SelectedMobs = {},
 	CombatStyle = "Melee",
 	AutoAttack = false,
-	RangeEnabled = false,
-	RangeSize = 45,
-	SideOffset = 3.5,
-	TpBypass = true,
-	InstantKillBoss = false,
-	SelectedBoss = nil
+	RangeEnabled = true,
+	RangeSize = 450,
+	SideOffset = 4.5,
+	TpBypass = true
 }
 
 local LabelToRealName = {}
-local BossLabelToRealName = {}
 local KnownMobPositions = {}
 local KnownMobLevels = {}
 local UniqueMobSet = {}
-local KnownBossSet = {}
 local CachedAliveByName = {}
 local CachedRemotes = {}
 local LastMobScan = 0
@@ -77,10 +73,6 @@ local IslandProbeIndex = 1
 local IgnoredKeywords = {
 	"dummy", "damage", "dmg", "test", "testing", "training", "train",
 	"dps", "target", "bag", "punching", "shop", "quest", "vendor"
-}
-
-local BossKeywords = {
-	"boss", "king", "lord", "admiral", "emperor", "champion"
 }
 
 local function IsIgnoredModel(obj)
@@ -103,30 +95,9 @@ local function IsIgnoredModel(obj)
 	return false
 end
 
-local function IsBossModel(obj, hum)
-	if not obj then return false end
-	local n = obj.Name:lower()
-	for _, kw in ipairs(BossKeywords) do
-		if n:find(kw, 1, true) then
-			return true
-		end
-	end
-	if obj:GetAttribute("IsBoss") == true or obj:GetAttribute("Boss") == true then
-		return true
-	end
-	if hum and hum.MaxHealth >= 15000 then
-		return true
-	end
-	local parent = obj.Parent
-	if parent and parent.Name:lower():find("boss", 1, true) then
-		return true
-	end
-	return false
-end
-
 local function GetScanRoots()
 	local roots = {}
-	for _, folderName in ipairs({"Enemies", "Mobs", "Monsters", "Bosses"}) do
+	for _, folderName in ipairs({"Enemies", "Mobs", "Monsters"}) do
 		local folder = Workspace:FindFirstChild(folderName)
 		if folder then
 			table.insert(roots, folder)
@@ -170,7 +141,7 @@ local function ExtractMobLevel(model, hum)
 end
 
 local function ScanWorldMobs(force)
-	if not force and (os.clock() - LastMobScan < 0.65) then
+	if not force and (os.clock() - LastMobScan < 0.75) then
 		return CachedAliveByName
 	end
 	LastMobScan = os.clock()
@@ -186,12 +157,7 @@ local function ScanWorldMobs(force)
 				if hum then
 					local realName = tostring(obj.Name):gsub("^%s+", ""):gsub("%s+$", "")
 					if realName ~= "" then
-						local isBoss = IsBossModel(obj, hum)
-						if isBoss then
-							KnownBossSet[realName] = true
-						else
-							UniqueMobSet[realName] = true
-						end
+						UniqueMobSet[realName] = true
 
 						local detectedLv = ExtractMobLevel(obj, hum)
 						if detectedLv then
@@ -208,8 +174,7 @@ local function ScanWorldMobs(force)
 							table.insert(aliveMap[realName], {
 								model = obj,
 								hum = hum,
-								hrp = hrp,
-								isBoss = isBoss
+								hrp = hrp
 							})
 							counts[realName] = (counts[realName] or 0) + 1
 						end
@@ -226,10 +191,6 @@ local function ScanWorldMobs(force)
 	if repMobs then
 		collectFrom(repMobs, false)
 	end
-	local repBosses = ReplicatedStorage:FindFirstChild("Bosses")
-	if repBosses then
-		collectFrom(repBosses, false)
-	end
 
 	CachedAliveByName = aliveMap
 	return aliveMap, counts
@@ -241,14 +202,13 @@ end
 local Window = Rayfield:CreateWindow({
 	Name = "Sailor Piece Hub | Sea 2",
 	LoadingTitle = "Carregando Hub...",
-	LoadingSubtitle = "Fast Auto Farm • Instant Kill Boss • TP Bypass",
+	LoadingSubtitle = "Multi-Mob • TP Bypass • 450 Range",
 	ConfigurationSaving = { Enabled = false },
 	KeySystem = false
 })
 
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 local CombatTab = Window:CreateTab("Combate & Range", 4483362458)
-local BossTab = Window:CreateTab("Boss Kill", 4483362458)
 
 local function BuildMobList()
 	table.clear(LabelToRealName)
@@ -281,37 +241,6 @@ local function BuildMobList()
 	if #displayList == 0 then
 		table.insert(displayList, "Nenhum mob encontrado")
 	end
-	return displayList
-end
-
-local function BuildBossList()
-	table.clear(BossLabelToRealName)
-	local _, counts = ScanWorldMobs(true)
-
-	local sortedBosses = {}
-	local seenNorm = {}
-	for bossName in pairs(KnownBossSet) do
-		local norm = bossName:lower()
-		if not seenNorm[norm] then
-			seenNorm[norm] = true
-			table.insert(sortedBosses, bossName)
-		end
-	end
-	table.sort(sortedBosses, function(a, b)
-		return a:lower() < b:lower()
-	end)
-
-	local displayList = {"Todos os Bosses"}
-	for _, bossName in ipairs(sortedBosses) do
-		local lvStr = KnownMobLevels[bossName] and (" [Lv." .. KnownMobLevels[bossName] .. "]") or ""
-		local aliveCount = (counts and counts[bossName]) or 0
-		local statusStr = aliveCount > 0 and " [VIVO]" or " [Aguardando]"
-		local label = bossName .. lvStr .. statusStr
-
-		BossLabelToRealName[label] = bossName
-		table.insert(displayList, label)
-	end
-
 	return displayList
 end
 
@@ -354,7 +283,7 @@ FarmTab:CreateButton({
 })
 
 FarmTab:CreateToggle({
-	Name = "Ativar Auto Farm (Rápido)",
+	Name = "Ativar Auto Farm",
 	CurrentValue = false,
 	Flag = "AutoFarmToggle",
 	Callback = function(Value)
@@ -405,8 +334,8 @@ CombatTab:CreateToggle({
 })
 
 CombatTab:CreateToggle({
-	Name = "Range (Alcance)",
-	CurrentValue = false,
+	Name = "Range (Bater de Longe)",
+	CurrentValue = true,
 	Flag = "RangeToggle",
 	Callback = function(Value)
 		getgenv().HubConfig.RangeEnabled = Value
@@ -414,11 +343,11 @@ CombatTab:CreateToggle({
 })
 
 CombatTab:CreateSlider({
-	Name = "Alcance do Range",
-	Range = {15, 200},
+	Name = "Distância / Alcance do Range",
+	Range = {15, 450},
 	Increment = 5,
 	Suffix = "Studs",
-	CurrentValue = 45,
+	CurrentValue = 450,
 	Flag = "RangeSizeSlider",
 	Callback = function(Value)
 		getgenv().HubConfig.RangeSize = Value
@@ -426,54 +355,11 @@ CombatTab:CreateSlider({
 })
 
 --// ==========================================
---// ABA 3: INSTANT KILL BOSS + LISTA DE BOSSES
---// ==========================================
-BossTab:CreateToggle({
-	Name = "Instant Kill Boss",
-	CurrentValue = false,
-	Flag = "InstantKillBossToggle",
-	Callback = function(Value)
-		getgenv().HubConfig.InstantKillBoss = Value
-	end,
-})
-
-local BossDropdown = BossTab:CreateDropdown({
-	Name = "Selecionar Boss",
-	Options = BuildBossList(),
-	CurrentOption = {"Todos os Bosses"},
-	MultipleOptions = false,
-	Flag = "BossSelectDropdown",
-	Callback = function(Option)
-		local label = type(Option) == "table" and Option[1] or Option
-		if not label or label == "Todos os Bosses" then
-			getgenv().HubConfig.SelectedBoss = nil
-		else
-			getgenv().HubConfig.SelectedBoss = BossLabelToRealName[label] or label
-		end
-	end,
-})
-
-BossTab:CreateButton({
-	Name = "Atualizar Lista de Bosses",
-	Callback = function()
-		local updatedBosses = BuildBossList()
-		pcall(function() BossDropdown:Refresh(updatedBosses) end)
-		pcall(function()
-			Rayfield:Notify({
-				Title = "Bosses Atualizados",
-				Content = "Lista de bosses atualizada.",
-				Duration = 2.5
-			})
-		end)
-	end,
-})
-
---// ==========================================
---// MECÂNICAS: TP BYPASS, ATAQUE RÁPIDO E INSTANT KILL BOSS
+--// MECÂNICAS: TP BYPASS REFORÇADO E ATAQUE
 --// ==========================================
 local FloorPart = Instance.new("Part")
 FloorPart.Name = "HubSafeFloor"
-FloorPart.Size = Vector3.new(20, 1, 20)
+FloorPart.Size = Vector3.new(24, 1, 24)
 FloorPart.Transparency = 1
 FloorPart.Anchored = true
 FloorPart.CanCollide = true
@@ -482,7 +368,7 @@ FloorPart.Parent = Workspace
 table.insert(ActiveConnections, RunService.Stepped:Connect(function()
 	if not ActiveRunning then return end
 	local char, _, hrp = GetCharParts()
-	if (getgenv().HubConfig.AutoFarm or getgenv().HubConfig.InstantKillBoss) and char and hrp then
+	if getgenv().HubConfig.AutoFarm and char and hrp then
 		for _, part in ipairs(char:GetDescendants()) do
 			if part:IsA("BasePart") then
 				part.CanCollide = false
@@ -497,23 +383,43 @@ table.insert(ActiveConnections, RunService.Stepped:Connect(function()
 end))
 
 local function DirectTeleport(targetCFrame)
-	local _, hum, hrp = GetCharParts()
-	if not hrp or not targetCFrame then return end
-	local dist = (hrp.Position - targetCFrame.Position).Magnitude
+	local char, hum, hrp = GetCharParts()
+	if not char or not hrp or not targetCFrame then return end
 
-	if dist > 100 and (os.clock() - LastTpTime > 0.45) then
-		LastTpTime = os.clock()
-		pcall(function()
-			if hum then
-				hum:ChangeState(Enum.HumanoidStateType.Running)
+	local dist = (hrp.Position - targetCFrame.Position).Magnitude
+	if dist < 1.5 then return end
+
+	pcall(function()
+		if hum then
+			if hum.Sit then hum.Sit = false end
+			hum:ChangeState(Enum.HumanoidStateType.Running)
+		end
+		if dist > 80 and (os.clock() - LastTpTime > 0.35) then
+			LastTpTime = os.clock()
+			if LocalPlayer.RequestStreamAroundAsync then
+				LocalPlayer:RequestStreamAroundAsync(targetCFrame.Position)
 			end
-			LocalPlayer:RequestStreamAroundAsync(targetCFrame.Position)
-		end)
+		end
+	end)
+
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.AssemblyLinearVelocity = Vector3.zero
+			part.AssemblyAngularVelocity = Vector3.zero
+		end
 	end
 
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.AssemblyAngularVelocity = Vector3.zero
-	hrp.CFrame = targetCFrame
+	local pivoted = false
+	pcall(function()
+		char:PivotTo(targetCFrame)
+		pivoted = true
+	end)
+
+	if not pivoted or (hrp.Position - targetCFrame.Position).Magnitude > 12 then
+		pcall(function()
+			hrp.CFrame = targetCFrame
+		end)
+	end
 end
 
 local function EquipSelectedStyle()
@@ -558,7 +464,7 @@ local function GetAttackRemotes()
 	for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
 		if rem:IsA("RemoteEvent") then
 			local rName = rem.Name:lower()
-			if rName:find("combat") or rName:find("attack") or rName:find("hit") or rName:find("m1") or rName:find("swing") or rName:find("punch") or rName:find("slash") or rName:find("damage") or rName:find("skill") then
+			if rName:find("combat") or rName:find("attack") or rName:find("hit") or rName:find("m1") or rName:find("swing") or rName:find("punch") or rName:find("slash") then
 				table.insert(list, rem)
 			end
 		end
@@ -567,31 +473,55 @@ local function GetAttackRemotes()
 	return CachedRemotes
 end
 
-local function ExecuteAttack(targetEntry, burstCount)
-	local char = LocalPlayer.Character
-	if not char then return end
-	local tool = char:FindFirstChildOfClass("Tool")
-	local hits = burstCount or 1
+local function GetRangedAttackCFrame(targetHRP, extraHeight)
+	local _, _, hrp = GetCharParts()
+	local rangeDist = math.clamp(tonumber(getgenv().HubConfig.RangeSize) or 450, 15, 450)
+	local hOffset = extraHeight or 2.5
 
-	for _ = 1, hits do
-		if tool then
-			pcall(function() tool:Activate() end)
-			for _, child in ipairs(tool:GetChildren()) do
-				if child:IsA("RemoteEvent") then
-					pcall(function() child:FireServer() end)
-					if targetEntry and targetEntry.hrp then
-						pcall(function() child:FireServer(targetEntry.hrp.Position, targetEntry.model) end)
-					end
+	if getgenv().HubConfig.RangeEnabled then
+		local dir = Vector3.zero
+		if hrp then
+			dir = hrp.Position - targetHRP.Position
+			dir = Vector3.new(dir.X, 0, dir.Z)
+		end
+		if dir.Magnitude < 0.01 then
+			dir = targetHRP.CFrame.RightVector
+		end
+		local standPos = targetHRP.Position + (dir.Unit * rangeDist) + Vector3.new(0, hOffset, 0)
+		return CFrame.lookAt(standPos, targetHRP.Position)
+	end
+
+	local sidePos = (targetHRP.CFrame * CFrame.new(getgenv().HubConfig.SideOffset, hOffset, 0)).Position
+	return CFrame.lookAt(sidePos, targetHRP.Position)
+end
+
+local function ExecuteAttack(targetEntry)
+	local char, _, hrp = GetCharParts()
+	if not char then return end
+	local tool = EquipSelectedStyle() or char:FindFirstChildOfClass("Tool")
+
+	if tool then
+		pcall(function() tool:Activate() end)
+		for _, child in ipairs(tool:GetChildren()) do
+			if child:IsA("RemoteEvent") then
+				pcall(function() child:FireServer() end)
+				if targetEntry and targetEntry.hrp then
+					pcall(function() child:FireServer(targetEntry.hrp.Position, targetEntry.model) end)
 				end
 			end
 		end
+	end
 
-		local remotes = GetAttackRemotes()
-		for _, rem in ipairs(remotes) do
-			pcall(function() rem:FireServer(getgenv().HubConfig.CombatStyle) end)
-			if targetEntry and targetEntry.hrp then
-				pcall(function() rem:FireServer(targetEntry.model, targetEntry.hrp.CFrame) end)
-				pcall(function() rem:FireServer(targetEntry.hrp.Position) end)
+	local remotes = GetAttackRemotes()
+	local maxRange = getgenv().HubConfig.RangeEnabled and (tonumber(getgenv().HubConfig.RangeSize) or 450) or 25
+
+	for _, rem in ipairs(remotes) do
+		pcall(function() rem:FireServer(getgenv().HubConfig.CombatStyle) end)
+		if targetEntry and targetEntry.hrp and hrp then
+			local dist = (hrp.Position - targetEntry.hrp.Position).Magnitude
+			if dist <= maxRange then
+				pcall(function() rem:FireServer(targetEntry.model, targetEntry.hrp.CFrame, maxRange) end)
+				pcall(function() rem:FireServer(targetEntry.hrp.Position, maxRange) end)
 			end
 		end
 	end
@@ -599,9 +529,9 @@ end
 
 task.spawn(function()
 	while ActiveRunning do
-		task.wait(0.08)
+		task.wait(0.14)
 		if getgenv().HubConfig.AutoAttack then
-			ExecuteAttack(nil, 1)
+			ExecuteAttack(nil)
 		end
 	end
 end)
@@ -624,13 +554,9 @@ local function GetOtherIslandTargetCF(selected)
 		end
 	end
 
-	if os.clock() - LastTpTime > 0.75 then
-		local spot = FallbackIslandScanSpots[IslandProbeIndex]
-		IslandProbeIndex = (IslandProbeIndex % #FallbackIslandScanSpots) + 1
-		return spot
-	end
-
-	return nil
+	local spot = FallbackIslandScanSpots[IslandProbeIndex]
+	IslandProbeIndex = (IslandProbeIndex % #FallbackIslandScanSpots) + 1
+	return spot
 end
 
 local function MatchesSelectedMob(mobName)
@@ -666,7 +592,7 @@ local function GetNextSelectedTarget()
 		local list = aliveMap[selName]
 		if list then
 			for _, entry in ipairs(list) do
-				if not entry.isBoss and entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
+				if entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
 					KnownMobPositions[selName] = entry.hrp.CFrame
 					local d = (hrp.Position - entry.hrp.Position).Magnitude
 					if d < bestDist then
@@ -683,7 +609,7 @@ local function GetNextSelectedTarget()
 				for mobName, listGroup in pairs(aliveMap) do
 					if MatchesSelectedMob(mobName) then
 						for _, entry in ipairs(listGroup) do
-							if not entry.isBoss and entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
+							if entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
 								local d = (hrp.Position - entry.hrp.Position).Magnitude
 								if d < bestDist then
 									bestDist = d
@@ -708,27 +634,26 @@ local function GetNextSelectedTarget()
 	return nil, nil
 end
 
-local function GetTargetBossEntry()
-	local _, _, hrp = GetCharParts()
-	local aliveMap = ScanWorldMobs(false)
-	local chosenBoss = getgenv().HubConfig.SelectedBoss
+task.spawn(function()
+	while ActiveRunning do
+		task.wait(0.14)
+		pcall(function()
+			local char, _, hrp = GetCharParts()
+			if not char or not hrp then return end
 
-	if chosenBoss then
-		local list = aliveMap[chosenBoss]
-		if list then
-			for _, entry in ipairs(list) do
-				if entry.model.Parent and entry.hrp.Parent and entry.hum.Health > 0 then
-					KnownMobPositions[chosenBoss] = entry.hrp.CFrame
-					return entry
+			if getgenv().HubConfig.AutoFarm then
+				EquipSelectedStyle()
+				local entry, nextIslandCF = GetNextSelectedTarget()
+
+				if entry and entry.hrp and entry.hrp.Parent then
+					local finalCF = GetRangedAttackCFrame(entry.hrp, 2.5)
+					DirectTeleport(finalCF)
+					ExecuteAttack(entry)
+				elseif nextIslandCF and getgenv().HubConfig.TpBypass then
+					DirectTeleport(nextIslandCF)
 				end
 			end
-		end
-		return nil
+		end)
 	end
+end)
 
-	local bestBoss = nil
-	local bestDist = math.huge
-	for bossName, list in pairs(aliveMap) do
-		if KnownBossSet[bossName] then
-			for _, entry in ipairs(list) do
-				if entry.model.Parent and entry.hrp.Parent and entr
