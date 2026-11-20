@@ -62,8 +62,8 @@ getgenv().HubConfig = {
 	SelectedMobs = {},
 	CombatStyle = "Melee",
 	AutoAttack = false,
-	RangeEnabled = true,
-	RangeSize = 150,
+	RangeEnabled = false,
+	RangeSize = 45,
 	SideOffset = 4.5,
 	TpBypass = true,
 	AutoSeaBeast = false,
@@ -199,7 +199,10 @@ local function ScanWorldMobs(force)
 	for _, root in ipairs(GetScanRoots()) do
 		collectFrom(root, true)
 	end
-	collectFrom(ReplicatedStorage:FindFirstChild("Enemies") or ReplicatedStorage:FindFirstChild("Mobs"), false)
+	local repMobs = ReplicatedStorage:FindFirstChild("Enemies") or ReplicatedStorage:FindFirstChild("Mobs")
+	if repMobs then
+		collectFrom(repMobs, false)
+	end
 
 	CachedAliveByName = aliveMap
 	return aliveMap, counts
@@ -211,7 +214,7 @@ end
 local Window = Rayfield:CreateWindow({
 	Name = "Sailor Piece Hub | Sea 2",
 	LoadingTitle = "Carregando Hub...",
-	LoadingSubtitle = "Multi-Mob • TP Bypass • Ultra Range",
+	LoadingSubtitle = "Multi-Mob • TP Bypass • Auto Select",
 	ConfigurationSaving = { Enabled = false },
 	KeySystem = false
 })
@@ -342,8 +345,8 @@ CombatTab:CreateToggle({
 })
 
 CombatTab:CreateToggle({
-	Name = "Range (Bater de Longe)",
-	CurrentValue = true,
+	Name = "Range (Alcance)",
+	CurrentValue = false,
 	Flag = "RangeToggle",
 	Callback = function(Value)
 		getgenv().HubConfig.RangeEnabled = Value
@@ -351,11 +354,11 @@ CombatTab:CreateToggle({
 })
 
 CombatTab:CreateSlider({
-	Name = "Distância / Alcance do Range",
-	Range = {20, 1000},
-	Increment = 10,
+	Name = "Alcance do Range",
+	Range = {15, 200},
+	Increment = 5,
 	Suffix = "Studs",
-	CurrentValue = 150,
+	CurrentValue = 45,
 	Flag = "RangeSizeSlider",
 	Callback = function(Value)
 		getgenv().HubConfig.RangeSize = Value
@@ -390,7 +393,7 @@ SeaTab:CreateButton({
 })
 
 --// ==========================================
---// MECÂNICAS: TP BYPASS, ATAQUE DE LONGE E SEA BEAST
+--// MECÂNICAS: TP BYPASS, ATAQUE E SEA BEAST
 --// ==========================================
 local FloorPart = Instance.new("Part")
 FloorPart.Name = "HubSafeFloor"
@@ -488,57 +491,23 @@ local function GetAttackRemotes()
 	return CachedRemotes
 end
 
-local function GetRangedAttackCFrame(targetHRP, extraHeight)
-	local _, _, hrp = GetCharParts()
-	local rangeDist = math.max(10, tonumber(getgenv().HubConfig.RangeSize) or 150)
-	local hOffset = extraHeight or 3
-
-	if getgenv().HubConfig.RangeEnabled then
-		local dir = Vector3.zero
-		if hrp then
-			dir = hrp.Position - targetHRP.Position
-			dir = Vector3.new(dir.X, 0, dir.Z)
-		end
-		if dir.Magnitude < 0.01 then
-			dir = targetHRP.CFrame.RightVector
-		end
-		local standPos = targetHRP.Position + (dir.Unit * rangeDist) + Vector3.new(0, hOffset, 0)
-		return CFrame.lookAt(standPos, targetHRP.Position)
-	end
-
-	local sidePos = (targetHRP.CFrame * CFrame.new(getgenv().HubConfig.SideOffset, hOffset, 0)).Position
-	return CFrame.lookAt(sidePos, targetHRP.Position)
-end
-
-local function ExecuteAttack(targetEntry)
-	local char, _, hrp = GetCharParts()
+local function ExecuteAttack()
+	local char = LocalPlayer.Character
 	if not char then return end
-	local tool = EquipSelectedStyle() or char:FindFirstChildOfClass("Tool")
+	local tool = char:FindFirstChildOfClass("Tool")
 
 	if tool then
 		pcall(function() tool:Activate() end)
 		for _, child in ipairs(tool:GetChildren()) do
 			if child:IsA("RemoteEvent") then
 				pcall(function() child:FireServer() end)
-				if targetEntry and targetEntry.hrp then
-					pcall(function() child:FireServer(targetEntry.hrp.Position, targetEntry.model) end)
-				end
 			end
 		end
 	end
 
 	local remotes = GetAttackRemotes()
-	local maxRange = getgenv().HubConfig.RangeEnabled and (tonumber(getgenv().HubConfig.RangeSize) or 150) or 25
-
 	for _, rem in ipairs(remotes) do
 		pcall(function() rem:FireServer(getgenv().HubConfig.CombatStyle) end)
-		if targetEntry and targetEntry.hrp and hrp then
-			local dist = (hrp.Position - targetEntry.hrp.Position).Magnitude
-			if dist <= maxRange then
-				pcall(function() rem:FireServer(targetEntry.model, targetEntry.hrp.CFrame, maxRange) end)
-				pcall(function() rem:FireServer(targetEntry.hrp.Position, maxRange) end)
-			end
-		end
 	end
 end
 
@@ -546,7 +515,7 @@ task.spawn(function()
 	while ActiveRunning do
 		task.wait(0.18)
 		if getgenv().HubConfig.AutoAttack then
-			ExecuteAttack(nil)
+			ExecuteAttack()
 		end
 	end
 end)
@@ -703,9 +672,9 @@ task.spawn(function()
 				local sbModel, sbPart = FindSeaBeast()
 
 				if sbModel and sbPart then
-					local attackCF = GetRangedAttackCFrame(sbPart, 16)
-					DirectTeleport(attackCF)
-					ExecuteAttack({model = sbModel, hrp = sbPart})
+					local attackPos = (sbPart.CFrame * CFrame.new(12, 16, 0)).Position
+					DirectTeleport(CFrame.lookAt(attackPos, sbPart.Position))
+					ExecuteAttack()
 				else
 					DirectTeleport(GetSeaBeastSpawnCFrame())
 				end
@@ -716,4 +685,17 @@ task.spawn(function()
 				EquipSelectedStyle()
 				local entry, nextIslandCF = GetNextSelectedTarget()
 
-				if e
+				if entry and entry.hrp and entry.hrp.Parent then
+					local mobHRP = entry.hrp
+					local sidePos = (mobHRP.CFrame * CFrame.new(getgenv().HubConfig.SideOffset, 0, 0)).Position
+					local finalCF = CFrame.lookAt(sidePos, mobHRP.Position)
+
+					DirectTeleport(finalCF)
+					ExecuteAttack()
+				elseif nextIslandCF and getgenv().HubConfig.TpBypass then
+					DirectTeleport(nextIslandCF)
+				end
+			end
+		end)
+	end
+end)
